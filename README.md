@@ -34,6 +34,17 @@ Open the local development URL shown by Vite, then allow microphone and webcam a
 - `npm run lint` — run ESLint across the source files
 - `npm run preview` — preview the production build
 
+## Streamlit fallback website
+
+If GitLab Pages or browser hosting is not available, you can run a local Streamlit preview site:
+
+```bash
+python -m pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+This provides a local website experience and shows the same AuraSense dashboard concepts with simulated metrics.
+
 ## How it works
 
 The current AuraSense implementation combines three telemetry domains:
