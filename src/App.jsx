@@ -10,6 +10,7 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState('')
   const [showInfo, setShowInfo] = useState(false)
   const [overlayEnabled, setOverlayEnabled] = useState(true)
+  const overlayEnabledRef = useRef(true)
   const [movementTimeline, setMovementTimeline] = useState([])
   const [metrics, setMetrics] = useState({
     ear: 0.28,
@@ -241,7 +242,7 @@ export default function App() {
   const startMotionOverlay = () => {
     if (overlayRAFRef.current) cancelAnimationFrame(overlayRAFRef.current)
     const loop = () => {
-      if (overlayEnabled) {
+      if (overlayEnabledRef.current) {
         try {
           drawMotionOverlay(metrics.movementLabel, metrics.motionScore)
         } catch (e) {
@@ -504,7 +505,16 @@ export default function App() {
               </div>
               <div>
                   <span className="motion-badge">Movement snapshot</span>
-                  <button className="overlay-toggle" onClick={() => setOverlayEnabled(v => !v)} style={{ marginLeft: 12 }}>
+                  <button
+                    className="overlay-toggle"
+                    onClick={() => {
+                      setOverlayEnabled(prev => {
+                        overlayEnabledRef.current = !prev
+                        return !prev
+                      })
+                    }}
+                    style={{ marginLeft: 12 }}
+                  >
                     {overlayEnabled ? 'Hide overlays' : 'Show overlays'}
                   </button>
               </div>
