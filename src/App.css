@@ -346,6 +346,52 @@
   line-height: 1.8;
 }
 
+.video-metric-panel {
+  margin-top: 24px;
+  padding: 22px;
+  border-radius: 22px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.video-metric-panel h4 {
+  margin: 0 0 16px;
+  font-size: 1.1rem;
+  color: #f8fafc;
+}
+
+.video-metric-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.video-metric-card {
+  background: rgba(248, 250, 252, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 18px;
+  padding: 18px;
+}
+
+.video-metric-card span {
+  display: block;
+  font-size: 0.9rem;
+  color: #a5b4fc;
+}
+
+.video-metric-card strong {
+  display: block;
+  margin-top: 10px;
+  font-size: 1.2rem;
+  color: #f8fafc;
+}
+
+.video-metric-card p {
+  margin: 10px 0 0;
+  color: rgba(226, 232, 240, 0.8);
+  line-height: 1.65;
+}
+
 @keyframes slideDown {
   from {
     opacity: 0;

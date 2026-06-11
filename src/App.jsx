@@ -20,6 +20,9 @@ export default function App() {
     backspaceCount: 0,
     movementLabel: 'Stable',
     motionScore: 12,
+    eyeAspect: 0.28,
+    headAngle: 2,
+    faceConfidence: 0.92,
   })
 
   const audioContextRef = useRef(null)
@@ -121,24 +124,60 @@ export default function App() {
     return '#10b981'
   }
 
-  const createBodyPartLines = (label) => {
+  const createBoundingBoxes = (label) => {
     const videoEl = videoRef.current
     const width = videoEl?.clientWidth || 640
     const height = videoEl?.clientHeight || 360
-    // Simulated normalized positions for head, shoulders, torso
+    const faceWidth = width * 0.5
+    const faceHeight = height * 0.42
     const cx = width / 2
-    const headY = height * 0.18
-    const shoulderY = height * 0.36
-    const torsoY = height * 0.62
+    const cy = height * 0.35
+    const eyeWidth = faceWidth * 0.18
+    const eyeHeight = faceHeight * 0.14
 
-    // intensity factor from label
-    const intensity = label === 'Active shift' ? 1 : label === 'Micro-adjustment' ? 0.6 : 0.18
+    const intensity = label === 'Active shift' ? 1 : label === 'Micro-adjustment' ? 0.7 : 0.28
 
     return [
-      { name: 'Head', x1: cx - 18 * intensity, y1: headY - 6, x2: cx + 18 * intensity, y2: headY + 6, weight: 3 + 2 * intensity },
-      { name: 'Left Shoulder', x1: cx - 80 * intensity, y1: shoulderY, x2: cx - 18 * intensity, y2: shoulderY + 6, weight: 2 + 2 * intensity },
-      { name: 'Right Shoulder', x1: cx + 18 * intensity, y1: shoulderY + 6, x2: cx + 80 * intensity, y2: shoulderY, weight: 2 + 2 * intensity },
-      { name: 'Torso', x1: cx - 24 * intensity, y1: torsoY - 6, x2: cx + 24 * intensity, y2: torsoY + 6, weight: 3 + 2 * intensity },
+      {
+        name: 'Face',
+        x: cx - faceWidth / 2,
+        y: cy - faceHeight / 2,
+        width: faceWidth,
+        height: faceHeight,
+        stroke: 'rgba(96,165,250,0.92)',
+        label: 'Face box',
+        lineWidth: 3,
+      },
+      {
+        name: 'Left eye',
+        x: cx - faceWidth * 0.22 - eyeWidth / 2 + intensity * 6,
+        y: cy - faceHeight * 0.12,
+        width: eyeWidth,
+        height: eyeHeight,
+        stroke: 'rgba(34,197,94,0.95)',
+        label: 'Eye box',
+        lineWidth: 2.5,
+      },
+      {
+        name: 'Right eye',
+        x: cx + faceWidth * 0.22 - eyeWidth / 2 - intensity * 6,
+        y: cy - faceHeight * 0.12,
+        width: eyeWidth,
+        height: eyeHeight,
+        stroke: 'rgba(34,197,94,0.95)',
+        label: 'Eye box',
+        lineWidth: 2.5,
+      },
+      {
+        name: 'Head angle',
+        x: cx - 16,
+        y: cy + faceHeight * 0.38,
+        width: 32,
+        height: 12,
+        stroke: 'rgba(249,115,22,0.96)',
+        label: 'Head tilt',
+        lineWidth: 2,
+      },
     ]
   }
 
@@ -166,30 +205,29 @@ export default function App() {
     ctx.fillStyle = 'rgba(2,6,23,0.18)'
     ctx.fillRect(0, 0, width, height)
 
-    const shapes = createBodyPartLines(label)
-    motionShapesRef.current = shapes
+    const boxes = createBoundingBoxes(label)
+    motionShapesRef.current = boxes
 
-    shapes.forEach(s => {
-      ctx.strokeStyle = color
-      ctx.lineWidth = s.weight
-      ctx.lineCap = 'round'
-      ctx.beginPath()
-      ctx.moveTo(s.x1, s.y1)
-      ctx.lineTo(s.x2, s.y2)
-      ctx.stroke()
+    boxes.forEach(box => {
+      ctx.strokeStyle = box.stroke
+      ctx.lineWidth = box.lineWidth
+      if (box.name === 'Head angle') ctx.setLineDash([4, 6])
+      else ctx.setLineDash([])
+      ctx.strokeRect(box.x, box.y, box.width, box.height)
+      ctx.setLineDash([])
 
-      // small pulsing dot at midpoint
-      const mx = (s.x1 + s.x2) / 2
-      const my = (s.y1 + s.y2) / 2
-      ctx.beginPath()
-      ctx.fillStyle = color
-      ctx.arc(mx, my, Math.max(2, s.weight), 0, Math.PI * 2)
-      ctx.fill()
-
-      // label
-      ctx.fillStyle = 'rgba(248,250,252,0.92)'
+      ctx.fillStyle = box.stroke
       ctx.font = '600 12px Inter, system-ui'
-      ctx.fillText(s.name, s.x2 + 8, s.y2 + 4)
+      ctx.fillText(box.label, box.x + 8, box.y - 10)
+
+      if (box.name === 'Left eye' || box.name === 'Right eye') {
+        ctx.fillStyle = 'rgba(16,185,129,0.92)'
+        ctx.fillText('EAR', box.x + 6, box.y + box.height + 18)
+      }
+      if (box.name === 'Face') {
+        ctx.fillStyle = 'rgba(96,165,250,0.92)'
+        ctx.fillText('Face area', box.x + 8, box.y + box.height + 18)
+      }
     })
 
     // score badge
@@ -250,6 +288,9 @@ export default function App() {
           const motionScore = motionChance > 0.75 ? 85 : motionChance > 0.45 ? 46 : 18
           const simulatedSlouch = Math.random() > 0.7 ? parseFloat((1.25 + Math.random() * 0.25).toFixed(2)) : 0.98
           const simulatedBlinks = Math.random() > 0.85 ? Math.floor(Math.random() * 5) + 3 : prev.blinkCount
+          const simulatedEyeAspect = Math.max(0.18, Math.min(0.45, 0.28 + (Math.random() - 0.5) * 0.08))
+          const simulatedHeadAngle = Math.round(2 + (Math.random() - 0.5) * 10)
+          const simulatedFaceConfidence = Math.max(0.75, Math.min(0.99, prev.faceConfidence + (Math.random() - 0.5) * 0.04))
           const nowLabel = `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
           const activityDetail = `${nowLabel} — ${movementLabel} detected`
 
@@ -263,6 +304,9 @@ export default function App() {
             blinkCount: simulatedBlinks,
             movementLabel,
             motionScore,
+            eyeAspect: simulatedEyeAspect,
+            headAngle: simulatedHeadAngle,
+            faceConfidence: parseFloat(simulatedFaceConfidence.toFixed(2)),
           }
         })
       }, 1000)
@@ -461,7 +505,7 @@ export default function App() {
               <div>
                   <span className="motion-badge">Movement snapshot</span>
                   <button className="overlay-toggle" onClick={() => setOverlayEnabled(v => !v)} style={{ marginLeft: 12 }}>
-                    {overlayEnabled ? 'Hide Lines' : 'Show Lines'}
+                    {overlayEnabled ? 'Hide overlays' : 'Show overlays'}
                   </button>
               </div>
             </div>
@@ -483,6 +527,27 @@ export default function App() {
           <p>
             The video feed captures your camera frame and simulates movement tracking every second. This helps AuraSense illustrate how posture and motion affect the visual modality score.
           </p>
+        </div>
+        <div className="video-metric-panel">
+          <h4>Computer vision signals</h4>
+          <div className="video-metric-grid">
+            <div className="video-metric-card">
+              <span>Face detection confidence</span>
+              <strong>{Math.round(metrics.faceConfidence * 100)}%</strong>
+            </div>
+            <div className="video-metric-card">
+              <span>Eye aspect ratio (EAR)</span>
+              <strong>{metrics.eyeAspect.toFixed(2)}</strong>
+            </div>
+            <div className="video-metric-card">
+              <span>Head angle</span>
+              <strong>{metrics.headAngle}°</strong>
+            </div>
+            <div className="video-metric-card">
+              <span>What the system checks</span>
+              <p>Face box, eye openness, head tilt, posture drift.</p>
+            </div>
+          </div>
         </div>
       </section>
 
