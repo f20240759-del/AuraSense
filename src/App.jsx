@@ -5,6 +5,7 @@ import {
   Camera,
   Cpu,
   Eye,
+  Info,
   KeyRound,
   ShieldCheck,
   Sparkles,
