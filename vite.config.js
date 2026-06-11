@@ -1,8 +1,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// https://vite.dev/config/
+// Forced cache reset timestamp: 2026-06-11
 export default defineConfig({
   plugins: [react()],
-  base: './', // <-- ADD THIS EXACT LINE HERE
+  base: './',
 })
