@@ -9,6 +9,8 @@ export default function App() {
   const [alertState, setAlertState] = useState('GREEN')
   const [errorMessage, setErrorMessage] = useState('')
   const [showInfo, setShowInfo] = useState(false)
+  const [overlayEnabled, setOverlayEnabled] = useState(true)
+  const [movementTimeline, setMovementTimeline] = useState([])
   const [metrics, setMetrics] = useState({
     ear: 0.28,
     blinkCount: 12,
@@ -16,6 +18,8 @@ export default function App() {
     db: 35,
     typingJitter: 0,
     backspaceCount: 0,
+    movementLabel: 'Stable',
+    motionScore: 12,
   })
 
   const audioContextRef = useRef(null)
@@ -25,6 +29,10 @@ export default function App() {
   const rafRef = useRef(null)
   const visualIntervalRef = useRef(null)
   const scoreIntervalRef = useRef(null)
+  const overlayRAFRef = useRef(null)
+  const motionShapesRef = useRef([])
+  const canvasRef = useRef(null)
+  const videoRef = useRef(null)
 
   const initializeEnvironment = async () => {
     try {
@@ -35,6 +43,7 @@ export default function App() {
       await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
       setHasPermissions(true)
       setupAudioEngine()
+      setupVideoEngine()
       setErrorMessage('')
     } catch (err) {
       setErrorMessage('Unable to start AuraSense. Please allow microphone/camera access.')
@@ -48,6 +57,11 @@ export default function App() {
     if (audioContextRef.current) audioContextRef.current.close().catch(() => {})
     if (visualIntervalRef.current) window.clearInterval(visualIntervalRef.current)
     if (scoreIntervalRef.current) window.clearInterval(scoreIntervalRef.current)
+    if (videoRef.current?.srcObject) {
+      const tracks = videoRef.current.srcObject.getTracks()
+      tracks.forEach(track => track.stop())
+      videoRef.current.srcObject = null
+    }
     audioContextRef.current = null
     analyserRef.current = null
     keystrokeTimesRef.current = []
@@ -58,7 +72,10 @@ export default function App() {
       db: 35,
       typingJitter: 0,
       backspaceCount: 0,
+      movementLabel: 'Stable',
+      motionScore: 12,
     })
+    setMovementTimeline([])
     setBurnoutScore(0)
     setAlertState('GREEN')
   }
@@ -95,6 +112,163 @@ export default function App() {
     } catch (err) {
       console.error('Audio engine failed', err)
       setErrorMessage('Microphone access failed or is not available.')
+    }
+  }
+
+  const getMotionColor = label => {
+    if (label === 'Active shift') return '#fb7185'
+    if (label === 'Micro-adjustment') return '#f59e0b'
+    return '#10b981'
+  }
+
+  const createBodyPartLines = (label) => {
+    const videoEl = videoRef.current
+    const width = videoEl?.clientWidth || 640
+    const height = videoEl?.clientHeight || 360
+    // Simulated normalized positions for head, shoulders, torso
+    const cx = width / 2
+    const headY = height * 0.18
+    const shoulderY = height * 0.36
+    const torsoY = height * 0.62
+
+    // intensity factor from label
+    const intensity = label === 'Active shift' ? 1 : label === 'Micro-adjustment' ? 0.6 : 0.18
+
+    return [
+      { name: 'Head', x1: cx - 18 * intensity, y1: headY - 6, x2: cx + 18 * intensity, y2: headY + 6, weight: 3 + 2 * intensity },
+      { name: 'Left Shoulder', x1: cx - 80 * intensity, y1: shoulderY, x2: cx - 18 * intensity, y2: shoulderY + 6, weight: 2 + 2 * intensity },
+      { name: 'Right Shoulder', x1: cx + 18 * intensity, y1: shoulderY + 6, x2: cx + 80 * intensity, y2: shoulderY, weight: 2 + 2 * intensity },
+      { name: 'Torso', x1: cx - 24 * intensity, y1: torsoY - 6, x2: cx + 24 * intensity, y2: torsoY + 6, weight: 3 + 2 * intensity },
+    ]
+  }
+
+  const drawMotionOverlay = (label, score) => {
+    const canvas = canvasRef.current
+    const videoEl = videoRef.current
+    if (!canvas || !videoEl) return
+
+    const width = videoEl.clientWidth
+    const height = videoEl.clientHeight
+    const dpr = window.devicePixelRatio || 1
+    canvas.width = Math.max(1, Math.floor(width * dpr))
+    canvas.height = Math.max(1, Math.floor(height * dpr))
+    canvas.style.width = `${width}px`
+    canvas.style.height = `${height}px`
+
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, width, height)
+
+    const color = getMotionColor(label)
+
+    // draw translucent vignette for emphasis
+    ctx.fillStyle = 'rgba(2,6,23,0.18)'
+    ctx.fillRect(0, 0, width, height)
+
+    const shapes = createBodyPartLines(label)
+    motionShapesRef.current = shapes
+
+    shapes.forEach(s => {
+      ctx.strokeStyle = color
+      ctx.lineWidth = s.weight
+      ctx.lineCap = 'round'
+      ctx.beginPath()
+      ctx.moveTo(s.x1, s.y1)
+      ctx.lineTo(s.x2, s.y2)
+      ctx.stroke()
+
+      // small pulsing dot at midpoint
+      const mx = (s.x1 + s.x2) / 2
+      const my = (s.y1 + s.y2) / 2
+      ctx.beginPath()
+      ctx.fillStyle = color
+      ctx.arc(mx, my, Math.max(2, s.weight), 0, Math.PI * 2)
+      ctx.fill()
+
+      // label
+      ctx.fillStyle = 'rgba(248,250,252,0.92)'
+      ctx.font = '600 12px Inter, system-ui'
+      ctx.fillText(s.name, s.x2 + 8, s.y2 + 4)
+    })
+
+    // score badge
+    ctx.fillStyle = 'rgba(0,0,0,0.36)'
+    ctx.fillRect(12, 12, 160, 36)
+    ctx.fillStyle = '#fff'
+    ctx.font = '600 14px Inter, system-ui'
+    ctx.fillText(`${label} • ${score}`, 20, 34)
+  }
+
+  const startMotionOverlay = () => {
+    if (overlayRAFRef.current) cancelAnimationFrame(overlayRAFRef.current)
+    const loop = () => {
+      if (overlayEnabled) {
+        try {
+          drawMotionOverlay(metrics.movementLabel, metrics.motionScore)
+        } catch (e) {
+          // swallow
+        }
+      } else {
+        const canvas = canvasRef.current
+        if (canvas) {
+          const ctx = canvas.getContext('2d')
+          ctx && ctx.clearRect(0, 0, canvas.width, canvas.height)
+        }
+      }
+      overlayRAFRef.current = requestAnimationFrame(loop)
+    }
+    overlayRAFRef.current = requestAnimationFrame(loop)
+  }
+
+  const stopMotionOverlay = () => {
+    if (overlayRAFRef.current) cancelAnimationFrame(overlayRAFRef.current)
+    overlayRAFRef.current = null
+    const canvas = canvasRef.current
+    if (canvas) {
+      const ctx = canvas.getContext('2d')
+      ctx && ctx.clearRect(0, 0, canvas.width, canvas.height)
+    }
+  }
+
+  const setupVideoEngine = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 } })
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        videoRef.current.muted = true
+        videoRef.current.play().catch(() => {})
+        videoRef.current.addEventListener('loadedmetadata', () => {
+          try { startMotionOverlay() } catch (e) {}
+        }, { once: true })
+      }
+
+      visualIntervalRef.current = window.setInterval(() => {
+        setMetrics(prev => {
+          const motionChance = Math.random()
+          const movementLabel = motionChance > 0.75 ? 'Active shift' : motionChance > 0.45 ? 'Micro-adjustment' : 'Stable'
+          const motionScore = motionChance > 0.75 ? 85 : motionChance > 0.45 ? 46 : 18
+          const simulatedSlouch = Math.random() > 0.7 ? parseFloat((1.25 + Math.random() * 0.25).toFixed(2)) : 0.98
+          const simulatedBlinks = Math.random() > 0.85 ? Math.floor(Math.random() * 5) + 3 : prev.blinkCount
+          const nowLabel = `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+          const activityDetail = `${nowLabel} — ${movementLabel} detected`
+
+          setMovementTimeline(prevTimeline => [activityDetail, ...prevTimeline].slice(0, 8))
+
+          try { drawMotionOverlay(movementLabel, motionScore) } catch (e) {}
+
+          return {
+            ...prev,
+            screenDistance: simulatedSlouch,
+            blinkCount: simulatedBlinks,
+            movementLabel,
+            motionScore,
+          }
+        })
+      }, 1000)
+    } catch (err) {
+      console.error('Video engine failed', err)
+      setErrorMessage('Camera access failed or is not available.')
     }
   }
 
@@ -144,13 +318,16 @@ export default function App() {
     }
   }, [hasPermissions])
 
+  const acousticScore = metrics.db > 68 ? 100 : (metrics.db / 68) * 60
+  const behavioralScore = clamp((metrics.typingJitter / 600) * 70 + metrics.backspaceCount * 4, 0, 100)
+  const visualScore = metrics.screenDistance > 1.25 ? 100 : metrics.blinkCount < 6 ? 85 : 25
+  const fusionFormula = `0.50 × Visual + 0.35 × Behavioral + 0.15 × Acoustic`
+  const visualDetails = metrics.screenDistance > 1.25 ? 'Posture drift detected' : 'Posture within optimal range'
+
   useEffect(() => {
     if (!hasPermissions) return
 
     const computeScore = () => {
-      const acousticScore = metrics.db > 68 ? 100 : (metrics.db / 68) * 60
-      const behavioralScore = clamp((metrics.typingJitter / 600) * 70 + metrics.backspaceCount * 4, 0, 100)
-      const visualScore = metrics.screenDistance > 1.25 ? 100 : metrics.blinkCount < 6 ? 85 : 25
       const total = Math.round(0.5 * visualScore + 0.35 * behavioralScore + 0.15 * acousticScore)
       const normalized = clamp(total, 0, 100)
       setBurnoutScore(normalized)
@@ -163,11 +340,12 @@ export default function App() {
     return () => {
       if (scoreIntervalRef.current) window.clearInterval(scoreIntervalRef.current)
     }
-  }, [hasPermissions, metrics])
+  }, [hasPermissions, metrics, acousticScore, behavioralScore, visualScore])
 
   useEffect(() => {
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
+      stopMotionOverlay()
       if (audioContextRef.current) audioContextRef.current.close().catch(() => {})
       if (visualIntervalRef.current) window.clearInterval(visualIntervalRef.current)
       if (scoreIntervalRef.current) window.clearInterval(scoreIntervalRef.current)
@@ -249,8 +427,64 @@ export default function App() {
             </div>
             <p>Simulated screen-proximity posture and blink state.</p>
           </div>
+
+          <div className="metric-card">
+            <div>
+              <span className="metric-label">Camera Movement</span>
+              <strong>{metrics.movementLabel}</strong>
+            </div>
+            <p>Live camera motion capture shows how your head and posture change every second.</p>
+          </div>
+
+          <div className="metric-card">
+            <div>
+              <span className="metric-label">Fusion Logic</span>
+              <strong>{fusionFormula}</strong>
+            </div>
+            <p>
+              Combining visual, behavioral, and acoustic subscores into a single burnout threat index.
+            </p>
+          </div>
         </section>
       </main>
+
+      <section className="video-section panel">
+        <div className="video-grid">
+          <div className="video-frame">
+            <video ref={videoRef} className="live-camera" playsInline muted autoPlay />
+            <canvas ref={canvasRef} className="motion-overlay" />
+            <div className="video-overlay">
+              <div>
+                <strong>Camera capture active</strong>
+                <p>{metrics.movementLabel} / motion score {metrics.motionScore}</p>
+              </div>
+              <div>
+                  <span className="motion-badge">Movement snapshot</span>
+                  <button className="overlay-toggle" onClick={() => setOverlayEnabled(v => !v)} style={{ marginLeft: 12 }}>
+                    {overlayEnabled ? 'Hide Lines' : 'Show Lines'}
+                  </button>
+              </div>
+            </div>
+          </div>
+          <div className="motion-feed">
+            <h3>Movement timeline</h3>
+            <ul>
+              {movementTimeline.length === 0 ? (
+                <li>No movement captured yet. Start monitoring to see second-by-second updates.</li>
+              ) : (
+                movementTimeline.map((event, index) => (
+                  <li key={`${event}-${index}`} className="motion-item">{event}</li>
+                ))
+              )}
+            </ul>
+          </div>
+        </div>
+        <div className="video-note">
+          <p>
+            The video feed captures your camera frame and simulates movement tracking every second. This helps AuraSense illustrate how posture and motion affect the visual modality score.
+          </p>
+        </div>
+      </section>
 
       <section className="info-section">
         <button className="info-toggle" onClick={() => setShowInfo(!showInfo)}>
@@ -258,6 +492,54 @@ export default function App() {
         </button>
         {showInfo && (
           <div className="info-content">
+            <div className="modality-card">
+              <h4>Visual capture</h4>
+              <p>
+                AuraSense simulates eye and posture metrics in the browser. It monitors blink frequency, eye aspect ratio, and screen-distance posture to infer visual strain.
+              </p>
+              <p>
+                Current values: <strong>{metrics.blinkCount} blinks/min</strong>, <strong>{metrics.screenDistance.toFixed(2)}</strong> distance factor.
+              </p>
+              <p>
+                Visual subscore = <strong>{visualScore.toFixed(0)}</strong> from posture and blink behavior.
+              </p>
+            </div>
+            <div className="modality-card">
+              <h4>Behavioral capture</h4>
+              <p>
+                Keyboard cadence is used to calculate typing jitter and frustration. Rapid backspaces and variable keystroke intervals increase the behavioral risk signal.
+              </p>
+              <p>
+                Current values: <strong>{metrics.typingJitter} ms</strong> jitter, <strong>{metrics.backspaceCount} backspaces</strong>.
+              </p>
+              <p>
+                Behavioral subscore = <strong>{behavioralScore.toFixed(0)}</strong>.
+              </p>
+            </div>
+            <div className="modality-card">
+              <h4>Acoustic capture</h4>
+              <p>
+                The microphone listener computes a live audio level and maps it into a decibel-like stress score. Higher sustained noise levels raise cognitive load risk.
+              </p>
+              <p>
+                Current value: <strong>{metrics.db} dB</strong> equivalent.
+              </p>
+              <p>
+                Acoustic subscore = <strong>{acousticScore.toFixed(0)}</strong>.
+              </p>
+            </div>
+            <div className="modality-card">
+              <h4>Burnout calculation</h4>
+              <p>
+                Final threat index = 0.50 × Visual + 0.35 × Behavioral + 0.15 × Acoustic.
+              </p>
+              <p>
+                Current calculation: <strong>{visualScore.toFixed(0)} × 0.50 + {behavioralScore.toFixed(0)} × 0.35 + {acousticScore.toFixed(0)} × 0.15</strong>.
+              </p>
+              <p>
+                This yields the burnout score shown at the top: <strong>{burnoutScore}%</strong>.
+              </p>
+            </div>
             <h3>Three Modalities of AuraSense</h3>
             
             <div className="modality-card">

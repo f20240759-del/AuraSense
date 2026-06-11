@@ -221,6 +221,131 @@
   animation: slideDown 0.3s ease-out;
 }
 
+.video-section {
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 28px;
+  padding: 28px;
+}
+
+.video-grid {
+  display: grid;
+  gap: 24px;
+  grid-template-columns: minmax(360px, 1.4fr) minmax(240px, 0.8fr);
+  align-items: start;
+}
+
+.video-frame {
+  position: relative;
+  border-radius: 24px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: #000;
+}
+
+.motion-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  mix-blend-mode: screen;
+}
+
+.video-frame:hover .live-camera {
+  transform: scale(1.02);
+  transition: transform 220ms ease;
+}
+
+.overlay-toggle {
+  background: rgba(248,250,252,0.06);
+  border: 1px solid rgba(148,163,184,0.12);
+  color: #f8fafc;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.motion-item:hover {
+  transform: translateX(6px);
+  background: rgba(255,255,255,0.02);
+  border-color: rgba(148,163,184,0.18);
+}
+
+.live-camera {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: #000;
+}
+
+.video-overlay {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.84);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  color: #f8fafc;
+  gap: 12px;
+}
+
+.motion-badge {
+  display: inline-flex;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.15);
+  color: #93c5fd;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.motion-feed {
+  background: rgba(248, 250, 252, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 22px;
+  padding: 24px;
+  min-height: 260px;
+}
+
+.motion-feed h3 {
+  margin-top: 0;
+  margin-bottom: 16px;
+  color: #f8fafc;
+}
+
+.motion-feed ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.motion-item {
+  padding: 14px 16px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  border-radius: 16px;
+  color: #e2e8f0;
+  font-size: 0.95rem;
+}
+
+.video-note {
+  margin-top: 20px;
+  color: rgba(226, 232, 240, 0.85);
+  line-height: 1.8;
+}
+
 @keyframes slideDown {
   from {
     opacity: 0;
