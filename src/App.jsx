@@ -1,92 +1,210 @@
-import { useEffect, useRef, useState } from 'react'
-import './App.css'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Activity,
+  AlertTriangle,
+  Camera,
+  Cpu,
+  Eye,
+  KeyRound,
+  ShieldCheck,
+  Sparkles,
+  ToggleLeft,
+  Volume2,
+} from 'lucide-react'
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
 
-export default function App() {
-  const [hasPermissions, setHasPermissions] = useState(false)
-  const [burnoutScore, setBurnoutScore] = useState(0)
-  const [alertState, setAlertState] = useState('GREEN')
-  const [errorMessage, setErrorMessage] = useState('')
-  const [showInfo, setShowInfo] = useState(false)
-  const [overlayEnabled, setOverlayEnabled] = useState(true)
-  const overlayEnabledRef = useRef(true)
-  const [movementTimeline, setMovementTimeline] = useState([])
-  const [metrics, setMetrics] = useState({
-    ear: 0.28,
-    blinkCount: 12,
-    screenDistance: 0.98,
-    db: 35,
-    typingJitter: 0,
-    backspaceCount: 0,
-    movementLabel: 'Stable',
-    motionScore: 12,
-    eyeAspect: 0.28,
-    headAngle: 2,
-    faceConfidence: 0.92,
-  })
+const initialMetrics = {
+  db: 28,
+  blinkCount: 12,
+  screenDistance: 1.05,
+  typingJitter: 22,
+  backspaceCount: 0,
+  movementLabel: 'Stable',
+  motionScore: 18,
+  eyeAspect: 0.28,
+  headAngle: 2,
+  faceConfidence: 0.94,
+}
 
-  const audioContextRef = useRef(null)
+export default function App() {
+  const [hasAccess, setHasAccess] = useState(false)
+  const [monitoring, setMonitoring] = useState(false)
+  const [fallbackMode, setFallbackMode] = useState(false)
+  const [errorMessage, setErrorMessage] = useState('')
+  const [burnoutScore, setBurnoutScore] = useState(0)
+  const [alertState, setAlertState] = useState('green')
+  const [overlayEnabled, setOverlayEnabled] = useState(true)
+  const [showInfo, setShowInfo] = useState(false)
+  const [showSettings, setShowSettings] = useState(true)
+  const [aiSettings, setAiSettings] = useState({
+    localInference: true,
+    byokMode: false,
+    keepKeysLocal: true,
+  })
+  const [metrics, setMetrics] = useState(initialMetrics)
+  const [timeline, setTimeline] = useState([])
+  const [captureLabel, setCaptureLabel] = useState('Awaiting live feed')
+
+  const videoRef = useRef(null)
+  const canvasRef = useRef(null)
+  const wrapperRef = useRef(null)
+  const audioCtxRef = useRef(null)
   const analyserRef = useRef(null)
   const dataArrayRef = useRef(null)
+  const audioLoopRef = useRef(null)
+  const motionTimerRef = useRef(null)
+  const overlayLoopRef = useRef(null)
   const keystrokeTimesRef = useRef([])
-  const rafRef = useRef(null)
-  const visualIntervalRef = useRef(null)
-  const scoreIntervalRef = useRef(null)
-  const overlayRAFRef = useRef(null)
-  const motionShapesRef = useRef([])
-  const canvasRef = useRef(null)
-  const videoRef = useRef(null)
+  const videoStreamRef = useRef(null)
+  const overlayEnabledRef = useRef(overlayEnabled)
 
-  const initializeEnvironment = async () => {
-    try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error('Browser does not support media devices.')
-      }
+  useEffect(() => {
+    overlayEnabledRef.current = overlayEnabled
+  }, [overlayEnabled])
 
-      await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
-      setHasPermissions(true)
-      setupAudioEngine()
-      setupVideoEngine()
-      setErrorMessage('')
-    } catch (err) {
-      setErrorMessage('Unable to start AuraSense. Please allow microphone/camera access.')
-      console.error(err)
+  const scoreBreakdown = useMemo(() => {
+    const visualScore = clamp(44 + (1.15 - metrics.screenDistance) * 90 + (12 - metrics.blinkCount) * 2.8, 0, 100)
+    const behavioralScore = clamp(metrics.typingJitter * 0.72 + metrics.backspaceCount * 3.4, 0, 100)
+    const acousticScore = clamp((metrics.db - 24) * 1.15, 0, 100)
+    const combined = clamp(Math.round(visualScore * 0.5 + behavioralScore * 0.35 + acousticScore * 0.15), 0, 100)
+
+    return {
+      visualScore,
+      behavioralScore,
+      acousticScore,
+      combined,
     }
-  }
+  }, [metrics])
 
-  const stopMonitoring = () => {
-    setHasPermissions(false)
-    if (rafRef.current) cancelAnimationFrame(rafRef.current)
-    if (audioContextRef.current) audioContextRef.current.close().catch(() => {})
-    if (visualIntervalRef.current) window.clearInterval(visualIntervalRef.current)
-    if (scoreIntervalRef.current) window.clearInterval(scoreIntervalRef.current)
-    if (videoRef.current?.srcObject) {
-      const tracks = videoRef.current.srcObject.getTracks()
-      tracks.forEach(track => track.stop())
+  useEffect(() => {
+    setBurnoutScore(scoreBreakdown.combined)
+    setAlertState(scoreBreakdown.combined > 75 ? 'red' : scoreBreakdown.combined > 50 ? 'amber' : 'green')
+  }, [scoreBreakdown])
+
+  const resetState = () => {
+    if (overlayLoopRef.current) cancelAnimationFrame(overlayLoopRef.current)
+    if (audioLoopRef.current) cancelAnimationFrame(audioLoopRef.current)
+    if (motionTimerRef.current) window.clearInterval(motionTimerRef.current)
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {})
+      audioCtxRef.current = null
+      analyserRef.current = null
+      dataArrayRef.current = null
+    }
+
+    if (videoStreamRef.current) {
+      videoStreamRef.current.getTracks().forEach(track => track.stop())
+      videoStreamRef.current = null
+    }
+    if (videoRef.current) {
       videoRef.current.srcObject = null
     }
-    audioContextRef.current = null
-    analyserRef.current = null
-    keystrokeTimesRef.current = []
-    setMetrics({
-      ear: 0.28,
-      blinkCount: 12,
-      screenDistance: 0.98,
-      db: 35,
-      typingJitter: 0,
-      backspaceCount: 0,
-      movementLabel: 'Stable',
-      motionScore: 12,
-    })
-    setMovementTimeline([])
+
+    setHasAccess(false)
+    setMonitoring(false)
+    setFallbackMode(false)
+    setErrorMessage('')
+    setCaptureLabel('Awaiting live feed')
+    setMetrics(initialMetrics)
+    setTimeline([])
     setBurnoutScore(0)
-    setAlertState('GREEN')
+    setAlertState('green')
   }
 
-  const setupAudioEngine = async () => {
+  const drawOverlay = () => {
+    const canvas = canvasRef.current
+    const wrapper = wrapperRef.current
+    if (!canvas || !wrapper) return
+
+    const rect = wrapper.getBoundingClientRect()
+    const width = Math.max(1, Math.floor(rect.width))
+    const height = Math.max(1, Math.floor(rect.height))
+    const dpr = window.devicePixelRatio || 1
+
+    canvas.width = width * dpr
+    canvas.height = height * dpr
+    canvas.style.width = `${width}px`
+    canvas.style.height = `${height}px`
+
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, width, height)
+
+    if (!overlayEnabledRef.current) return
+
+    ctx.fillStyle = 'rgba(3, 7, 23, 0.28)'
+    ctx.fillRect(0, 0, width, height)
+
+    const base = alertState === 'red' ? '#fb7185' : alertState === 'amber' ? '#fbbf24' : '#34d399'
+    const nodeColor = fallbackMode ? '#60a5fa' : base
+
+    const nodes = [
+      { x: width * 0.22, y: height * 0.32, label: 'Face', color: '#60a5fa' },
+      { x: width * 0.42, y: height * 0.62, label: 'Eye', color: '#22c55e' },
+      { x: width * 0.7, y: height * 0.34, label: 'Head tilt', color: '#f59e0b' },
+    ]
+
+    nodes.forEach(node => {
+      ctx.strokeStyle = node.color
+      ctx.lineWidth = 2.3
+      ctx.setLineDash([6, 14])
+      ctx.beginPath()
+      ctx.ellipse(node.x, node.y, 82, 48, 0, 0, Math.PI * 2)
+      ctx.stroke()
+      ctx.setLineDash([])
+      ctx.fillStyle = node.color
+      ctx.font = '600 12px Inter, system-ui'
+      ctx.fillText(node.label.toUpperCase(), node.x - 36, node.y - 62)
+    })
+
+    ctx.strokeStyle = nodeColor
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.moveTo(width * 0.22, height * 0.32)
+    ctx.lineTo(width * 0.42, height * 0.62)
+    ctx.lineTo(width * 0.7, height * 0.34)
+    ctx.stroke()
+
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)'
+    ctx.fillRect(18, 18, 172, 38)
+    ctx.fillStyle = '#f8fafc'
+    ctx.font = '600 13px Inter, system-ui'
+    ctx.fillText(`${metrics.movementLabel} · ${metrics.motionScore}`, 28, 40)
+
+    if (fallbackMode) {
+      ctx.fillStyle = 'rgba(249, 115, 22, 0.92)'
+      ctx.fillRect(width - 232, 18, 214, 38)
+      ctx.fillStyle = '#020617'
+      ctx.fillText('SIMULATED MODE', width - 212, 40)
+    }
+  }
+
+  const startOverlayLoop = () => {
+    if (overlayLoopRef.current) cancelAnimationFrame(overlayLoopRef.current)
+    const loop = () => {
+      drawOverlay()
+      overlayLoopRef.current = requestAnimationFrame(loop)
+    }
+    overlayLoopRef.current = requestAnimationFrame(loop)
+  }
+
+  const startAudioSimulation = () => {
+    if (audioLoopRef.current) cancelAnimationFrame(audioLoopRef.current)
+    const loop = () => {
+      setMetrics(prev => ({
+        ...prev,
+        db: clamp(prev.db + (Math.random() - 0.5) * 6, 28, 82),
+      }))
+      audioLoopRef.current = requestAnimationFrame(loop)
+    }
+    audioLoopRef.current = requestAnimationFrame(loop)
+  }
+
+  const startAudioEngine = async stream => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const AudioContext = window.AudioContext || window.webkitAudioContext
       const audioContext = new AudioContext()
       const source = audioContext.createMediaStreamSource(stream)
@@ -94,247 +212,118 @@ export default function App() {
       analyser.fftSize = 64
       source.connect(analyser)
 
-      audioContextRef.current = audioContext
+      audioCtxRef.current = audioContext
       analyserRef.current = analyser
       dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount)
 
-      const updateAudio = () => {
+      const tick = () => {
         if (!analyserRef.current || !dataArrayRef.current) return
         analyserRef.current.getByteFrequencyData(dataArrayRef.current)
         const values = dataArrayRef.current
         let sum = 0
-        for (let i = 0; i < values.length; i += 1) {
-          sum += values[i] * values[i]
-        }
+        for (let i = 0; i < values.length; i += 1) sum += values[i] * values[i]
         const rms = Math.sqrt(sum / values.length)
         const score = clamp(Math.round((rms / 255) * 80) + 20, 20, 100)
         setMetrics(prev => ({ ...prev, db: score }))
-        rafRef.current = requestAnimationFrame(updateAudio)
+        audioLoopRef.current = requestAnimationFrame(tick)
       }
 
-      updateAudio()
-    } catch (err) {
-      console.error('Audio engine failed', err)
-      setErrorMessage('Microphone access failed or is not available.')
+      tick()
+    } catch (error) {
+      console.error('Audio engine failed', error)
+      startAudioSimulation()
     }
   }
 
-  const getMotionColor = label => {
-    if (label === 'Active shift') return '#fb7185'
-    if (label === 'Micro-adjustment') return '#f59e0b'
-    return '#10b981'
-  }
+  const startMotionEngine = liveMode => {
+    if (motionTimerRef.current) window.clearInterval(motionTimerRef.current)
+    motionTimerRef.current = window.setInterval(() => {
+      setMetrics(prev => {
+        const motionChance = Math.random()
+        const movementLabel = motionChance > 0.8 ? 'Active shift' : motionChance > 0.5 ? 'Micro-adjustment' : 'Stable'
+        const motionScore = motionChance > 0.8 ? 88 : motionChance > 0.5 ? 52 : 20
+        const nextDistance = clamp(prev.screenDistance + (Math.random() - 0.5) * 0.08, 0.92, 1.32)
+        const nextBlink = clamp(prev.blinkCount + (Math.random() > 0.7 ? -2 : Math.random() > 0.7 ? 2 : 0), 4, 20)
+        const nextEye = clamp(prev.eyeAspect + (Math.random() - 0.5) * 0.04, 0.18, 0.42)
+        const nextHead = clamp(prev.headAngle + (Math.random() - 0.5) * 6, -12, 18)
+        const nextFaceConfidence = clamp(prev.faceConfidence + (Math.random() - 0.5) * 0.03, 0.78, 0.99)
+        const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        const event = `${timestamp} • ${movementLabel} detected`
 
-  const createBoundingBoxes = (label) => {
-    const videoEl = videoRef.current
-    const width = videoEl?.clientWidth || 640
-    const height = videoEl?.clientHeight || 360
-    const faceWidth = width * 0.5
-    const faceHeight = height * 0.42
-    const cx = width / 2
-    const cy = height * 0.35
-    const eyeWidth = faceWidth * 0.18
-    const eyeHeight = faceHeight * 0.14
+        setTimeline(prevTimeline => [event, ...prevTimeline].slice(0, 6))
 
-    const intensity = label === 'Active shift' ? 1 : label === 'Micro-adjustment' ? 0.7 : 0.28
-
-    return [
-      {
-        name: 'Face',
-        x: cx - faceWidth / 2,
-        y: cy - faceHeight / 2,
-        width: faceWidth,
-        height: faceHeight,
-        stroke: 'rgba(96,165,250,0.92)',
-        label: 'Face box',
-        lineWidth: 3,
-      },
-      {
-        name: 'Left eye',
-        x: cx - faceWidth * 0.22 - eyeWidth / 2 + intensity * 6,
-        y: cy - faceHeight * 0.12,
-        width: eyeWidth,
-        height: eyeHeight,
-        stroke: 'rgba(34,197,94,0.95)',
-        label: 'Eye box',
-        lineWidth: 2.5,
-      },
-      {
-        name: 'Right eye',
-        x: cx + faceWidth * 0.22 - eyeWidth / 2 - intensity * 6,
-        y: cy - faceHeight * 0.12,
-        width: eyeWidth,
-        height: eyeHeight,
-        stroke: 'rgba(34,197,94,0.95)',
-        label: 'Eye box',
-        lineWidth: 2.5,
-      },
-      {
-        name: 'Head angle',
-        x: cx - 16,
-        y: cy + faceHeight * 0.38,
-        width: 32,
-        height: 12,
-        stroke: 'rgba(249,115,22,0.96)',
-        label: 'Head tilt',
-        lineWidth: 2,
-      },
-    ]
-  }
-
-  const drawMotionOverlay = (label, score) => {
-    const canvas = canvasRef.current
-    const videoEl = videoRef.current
-    if (!canvas || !videoEl) return
-
-    const width = videoEl.clientWidth
-    const height = videoEl.clientHeight
-    const dpr = window.devicePixelRatio || 1
-    canvas.width = Math.max(1, Math.floor(width * dpr))
-    canvas.height = Math.max(1, Math.floor(height * dpr))
-    canvas.style.width = `${width}px`
-    canvas.style.height = `${height}px`
-
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, width, height)
-
-    const color = getMotionColor(label)
-
-    // draw translucent vignette for emphasis
-    ctx.fillStyle = 'rgba(2,6,23,0.18)'
-    ctx.fillRect(0, 0, width, height)
-
-    const boxes = createBoundingBoxes(label)
-    motionShapesRef.current = boxes
-
-    boxes.forEach(box => {
-      ctx.strokeStyle = box.stroke
-      ctx.lineWidth = box.lineWidth
-      if (box.name === 'Head angle') ctx.setLineDash([4, 6])
-      else ctx.setLineDash([])
-      ctx.strokeRect(box.x, box.y, box.width, box.height)
-      ctx.setLineDash([])
-
-      ctx.fillStyle = box.stroke
-      ctx.font = '600 12px Inter, system-ui'
-      ctx.fillText(box.label, box.x + 8, box.y - 10)
-
-      if (box.name === 'Left eye' || box.name === 'Right eye') {
-        ctx.fillStyle = 'rgba(16,185,129,0.92)'
-        ctx.fillText('EAR', box.x + 6, box.y + box.height + 18)
-      }
-      if (box.name === 'Face') {
-        ctx.fillStyle = 'rgba(96,165,250,0.92)'
-        ctx.fillText('Face area', box.x + 8, box.y + box.height + 18)
-      }
-    })
-
-    // score badge
-    ctx.fillStyle = 'rgba(0,0,0,0.36)'
-    ctx.fillRect(12, 12, 160, 36)
-    ctx.fillStyle = '#fff'
-    ctx.font = '600 14px Inter, system-ui'
-    ctx.fillText(`${label} • ${score}`, 20, 34)
-  }
-
-  const startMotionOverlay = () => {
-    if (overlayRAFRef.current) cancelAnimationFrame(overlayRAFRef.current)
-    const loop = () => {
-      if (overlayEnabledRef.current) {
-        try {
-          drawMotionOverlay(metrics.movementLabel, metrics.motionScore)
-        } catch (e) {
-          // swallow
+        return {
+          ...prev,
+          movementLabel,
+          motionScore,
+          screenDistance: nextDistance,
+          blinkCount: nextBlink,
+          eyeAspect: parseFloat(nextEye.toFixed(2)),
+          headAngle: Math.round(nextHead),
+          faceConfidence: parseFloat(nextFaceConfidence.toFixed(2)),
         }
-      } else {
-        const canvas = canvasRef.current
-        if (canvas) {
-          const ctx = canvas.getContext('2d')
-          ctx && ctx.clearRect(0, 0, canvas.width, canvas.height)
-        }
-      }
-      overlayRAFRef.current = requestAnimationFrame(loop)
-    }
-    overlayRAFRef.current = requestAnimationFrame(loop)
-  }
+      })
+    }, 1200)
 
-  const stopMotionOverlay = () => {
-    if (overlayRAFRef.current) cancelAnimationFrame(overlayRAFRef.current)
-    overlayRAFRef.current = null
-    const canvas = canvasRef.current
-    if (canvas) {
-      const ctx = canvas.getContext('2d')
-      ctx && ctx.clearRect(0, 0, canvas.width, canvas.height)
+    if (!liveMode && !audioLoopRef.current) {
+      startAudioSimulation()
     }
   }
 
-  const setupVideoEngine = async () => {
+  const launchMonitoring = async () => {
+    await resetState()
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setErrorMessage('Your browser does not support secure media capture. Running local fallback engine.')
+      setMonitoring(true)
+      setFallbackMode(true)
+      setCaptureLabel('Simulated experience')
+      startMotionEngine(false)
+      startOverlayLoop()
+      return
+    }
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 } })
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: true })
+      videoStreamRef.current = stream
       if (videoRef.current) {
         videoRef.current.srcObject = stream
         videoRef.current.muted = true
-        videoRef.current.play().catch(() => {})
-        videoRef.current.addEventListener('loadedmetadata', () => {
-          try { startMotionOverlay() } catch (e) {}
-        }, { once: true })
+        await videoRef.current.play().catch(() => {})
       }
-
-      visualIntervalRef.current = window.setInterval(() => {
-        setMetrics(prev => {
-          const motionChance = Math.random()
-          const movementLabel = motionChance > 0.75 ? 'Active shift' : motionChance > 0.45 ? 'Micro-adjustment' : 'Stable'
-          const motionScore = motionChance > 0.75 ? 85 : motionChance > 0.45 ? 46 : 18
-          const simulatedSlouch = Math.random() > 0.7 ? parseFloat((1.25 + Math.random() * 0.25).toFixed(2)) : 0.98
-          const simulatedBlinks = Math.random() > 0.85 ? Math.floor(Math.random() * 5) + 3 : prev.blinkCount
-          const simulatedEyeAspect = Math.max(0.18, Math.min(0.45, 0.28 + (Math.random() - 0.5) * 0.08))
-          const simulatedHeadAngle = Math.round(2 + (Math.random() - 0.5) * 10)
-          const simulatedFaceConfidence = Math.max(0.75, Math.min(0.99, prev.faceConfidence + (Math.random() - 0.5) * 0.04))
-          const nowLabel = `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
-          const activityDetail = `${nowLabel} — ${movementLabel} detected`
-
-          setMovementTimeline(prevTimeline => [activityDetail, ...prevTimeline].slice(0, 8))
-
-          try { drawMotionOverlay(movementLabel, motionScore) } catch (e) {}
-
-          return {
-            ...prev,
-            screenDistance: simulatedSlouch,
-            blinkCount: simulatedBlinks,
-            movementLabel,
-            motionScore,
-            eyeAspect: simulatedEyeAspect,
-            headAngle: simulatedHeadAngle,
-            faceConfidence: parseFloat(simulatedFaceConfidence.toFixed(2)),
-          }
-        })
-      }, 1000)
-    } catch (err) {
-      console.error('Video engine failed', err)
-      setErrorMessage('Camera access failed or is not available.')
+      setHasAccess(true)
+      setMonitoring(true)
+      setFallbackMode(false)
+      setErrorMessage('')
+      setCaptureLabel('Live local capture')
+      startMotionEngine(true)
+      await startAudioEngine(stream)
+      startOverlayLoop()
+    } catch (error) {
+      console.warn('Live capture refused, enabling fallback engine.', error)
+      setMonitoring(true)
+      setHasAccess(false)
+      setFallbackMode(true)
+      setErrorMessage('Camera / mic permission blocked. Running secure fallback simulation.')
+      setCaptureLabel('Secure mock feed')
+      startMotionEngine(false)
+      startOverlayLoop()
     }
   }
 
   useEffect(() => {
     const handleKeyDown = event => {
-      if (!hasPermissions) return
+      if (!monitoring) return
       const timestamp = performance.now()
       keystrokeTimesRef.current.push(timestamp)
-      if (keystrokeTimesRef.current.length > 12) {
-        keystrokeTimesRef.current.shift()
-      }
+      if (keystrokeTimesRef.current.length > 12) keystrokeTimesRef.current.shift()
 
       if (event.key === 'Backspace') {
         setMetrics(prev => ({ ...prev, backspaceCount: prev.backspaceCount + 1 }))
       }
 
       if (keystrokeTimesRef.current.length > 3) {
-        const intervals = []
-        for (let i = 1; i < keystrokeTimesRef.current.length; i += 1) {
-          intervals.push(keystrokeTimesRef.current[i] - keystrokeTimesRef.current[i - 1])
-        }
+        const intervals = keystrokeTimesRef.current.slice(1).map((time, index) => time - keystrokeTimesRef.current[index])
         const mean = intervals.reduce((sum, value) => sum + value, 0) / intervals.length
         const variance = intervals.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0) / intervals.length
         setMetrics(prev => ({ ...prev, typingJitter: clamp(Math.round(variance), 0, 1000) }))
@@ -343,345 +332,337 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [hasPermissions])
-
-  useEffect(() => {
-    if (!hasPermissions) return
-
-    visualIntervalRef.current = window.setInterval(() => {
-      setMetrics(prev => ({
-        ...prev,
-        blinkCount: clamp(prev.blinkCount + (Math.random() > 0.75 ? -3 : 0), 3, 20),
-        screenDistance: prev.screenDistance > 1.2 ? 0.98 : clamp(prev.screenDistance + 0.02, 0.95, 1.35),
-      }))
-    }, 3500)
-
-    return () => {
-      if (visualIntervalRef.current) {
-        window.clearInterval(visualIntervalRef.current)
-      }
-    }
-  }, [hasPermissions])
-
-  const acousticScore = metrics.db > 68 ? 100 : (metrics.db / 68) * 60
-  const behavioralScore = clamp((metrics.typingJitter / 600) * 70 + metrics.backspaceCount * 4, 0, 100)
-  const visualScore = metrics.screenDistance > 1.25 ? 100 : metrics.blinkCount < 6 ? 85 : 25
-  const fusionFormula = `0.50 × Visual + 0.35 × Behavioral + 0.15 × Acoustic`
-  const visualDetails = metrics.screenDistance > 1.25 ? 'Posture drift detected' : 'Posture within optimal range'
-
-  useEffect(() => {
-    if (!hasPermissions) return
-
-    const computeScore = () => {
-      const total = Math.round(0.5 * visualScore + 0.35 * behavioralScore + 0.15 * acousticScore)
-      const normalized = clamp(total, 0, 100)
-      setBurnoutScore(normalized)
-      setAlertState(normalized > 75 ? 'RED' : normalized > 45 ? 'AMBER' : 'GREEN')
-    }
-
-    scoreIntervalRef.current = window.setInterval(computeScore, 1500)
-    computeScore()
-
-    return () => {
-      if (scoreIntervalRef.current) window.clearInterval(scoreIntervalRef.current)
-    }
-  }, [hasPermissions, metrics, acousticScore, behavioralScore, visualScore])
+  }, [monitoring])
 
   useEffect(() => {
     return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current)
-      stopMotionOverlay()
-      if (audioContextRef.current) audioContextRef.current.close().catch(() => {})
-      if (visualIntervalRef.current) window.clearInterval(visualIntervalRef.current)
-      if (scoreIntervalRef.current) window.clearInterval(scoreIntervalRef.current)
+      resetState()
     }
   }, [])
 
-  const statusLabel = hasPermissions ? 'LOCAL MONITOR ACTIVE' : 'PERMISSIONS REQUIRED'
-  const statusColor = alertState === 'RED' ? 'var(--alert-red)' : alertState === 'AMBER' ? 'var(--alert-amber)' : 'var(--alert-green)'
+  const statusLabel = monitoring
+    ? fallbackMode
+      ? 'SIMULATED SENSOR ENGINE'
+      : 'LIVE LOCAL MONITORING'
+    : 'READY TO LAUNCH'
+
+  const statusTone = alertState === 'red' ? 'bg-rose-500/15 text-rose-200 ring-rose-500/30' :
+    alertState === 'amber' ? 'bg-amber-500/15 text-amber-200 ring-amber-500/30' :
+    'bg-emerald-500/15 text-emerald-200 ring-emerald-500/30'
 
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div>
-          <p className="eyebrow">AuraSense</p>
-          <h1>Browser-native burnout & focus monitoring</h1>
-          <p className="intro">
-            A lightweight client-side safety dashboard that tracks local audio,
-            typing behavior, and ergonomic state in real time.
-          </p>
-        </div>
-        <div className="status-pill" style={{ borderColor: statusColor, color: statusColor }}>
-          <span className={`status-dot ${alertState.toLowerCase()}`} />
-          {statusLabel}
-        </div>
-      </header>
-
-      <main className="dashboard-grid">
-        <section className="panel intro-panel">
-          <div>
-            <p className="panel-label">Burnout Threat Index</p>
-            <h2>{burnoutScore}%</h2>
-            <p className="panel-copy">
-              {alertState === 'RED'
-                ? 'High risk — take a screen break and realign posture.'
-                : alertState === 'AMBER'
-                ? 'Warning state — reduce strain and reset focus.'
-                : 'Optimal state — keep the current pace and breathe.'}
-            </p>
+    <div className="relative min-h-screen overflow-hidden bg-slate-950 text-slate-100 px-4 py-6 sm:px-6 lg:px-10">
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-48 bg-gradient-to-b from-slate-900/90 to-transparent opacity-90" />
+      <div className="mx-auto flex max-w-7xl flex-col gap-8">
+        <header className="relative z-10 flex flex-col gap-6 rounded-[2rem] border border-slate-700/60 bg-slate-950/95 px-6 py-7 shadow-glow backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-3">
+            <div className="inline-flex items-center gap-3 rounded-full bg-slate-800/80 px-4 py-2 text-sm text-slate-300 ring-1 ring-slate-500/20">
+              <Sparkles className="h-4 w-4 text-cyan-300" />
+              AuraSense 2.0 • privacy-first burnout intelligence
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-[0.32em] text-slate-400">Cyberpunk wellbeing dashboard</p>
+              <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
+                Live multimodal burnout & focus intelligence
+              </h1>
+              <p className="max-w-2xl text-sm leading-7 text-slate-300 sm:text-base">
+                A fully client-side experience that blends camera overlays, keyboard telemetry,
+                microphone scoring, and local AI settings — all without leaving the browser.
+              </p>
+            </div>
           </div>
-          <div className="button-group">
-            <button className="start-button" onClick={initializeEnvironment} disabled={hasPermissions}>
-              {hasPermissions ? 'Monitoring...' : 'Start Monitoring'}
-            </button>
-            {hasPermissions && (
-              <button className="stop-button" onClick={stopMonitoring}>
-                Stop Monitoring
+
+          <div className={`inline-flex items-center gap-3 rounded-3xl border px-4 py-3 text-xs font-semibold uppercase tracking-[0.24em] ${statusTone}`}> 
+            <ShieldCheck className="h-4 w-4" />
+            {statusLabel}
+          </div>
+        </header>
+
+        <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+          <article className="space-y-6 rounded-[2rem] border border-slate-700/60 bg-slate-950/90 p-6 shadow-glow backdrop-blur-xl">
+            <div className="grid gap-4 sm:grid-cols-[1fr_auto] sm:items-end">
+              <div>
+                <p className="text-sm uppercase tracking-[0.25em] text-cyan-300/90">Threat Index</p>
+                <h2 className="mt-2 text-5xl font-semibold text-white sm:text-6xl">{burnoutScore}%</h2>
+                <p className="mt-3 max-w-xl text-sm leading-7 text-slate-300">
+                  {alertState === 'red'
+                    ? 'Critical risk. Pause your session, reset your posture, and let your body recover.'
+                    : alertState === 'amber'
+                    ? 'Rising strain. Slow down, breathe, and reduce noise to regain control.'
+                    : 'Healthy focus state. Keep the momentum and take intentional micro-breaks.'}
+                </p>
+              </div>
+              <div className="rounded-[1.75rem] border border-slate-700/90 bg-slate-900/95 p-4 text-right shadow-xl shadow-slate-950/20">
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Sensor mode</p>
+                <p className="mt-3 text-lg font-semibold text-white">{fallbackMode ? 'Fallback' : hasAccess ? 'Live' : 'Idle'}</p>
+                <p className="mt-2 text-xs leading-5 text-slate-400">{captureLabel}</p>
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <div className="rounded-[1.75rem] border border-slate-700/70 bg-slate-900/95 p-5">
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Visual</p>
+                <div className="mt-4 flex items-center gap-3 text-white">
+                  <Eye className="h-6 w-6 text-cyan-300" />
+                  <div>
+                    <p className="text-3xl font-semibold">{Math.round(scoreBreakdown.visualScore)}%</p>
+                    <p className="text-sm text-slate-400">Posture + blink analysis</p>
+                  </div>
+                </div>
+              </div>
+              <div className="rounded-[1.75rem] border border-slate-700/70 bg-slate-900/95 p-5">
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Behavior</p>
+                <div className="mt-4 flex items-center gap-3 text-white">
+                  <Activity className="h-6 w-6 text-emerald-300" />
+                  <div>
+                    <p className="text-3xl font-semibold">{Math.round(scoreBreakdown.behavioralScore)}%</p>
+                    <p className="text-sm text-slate-400">Typing cadence risk</p>
+                  </div>
+                </div>
+              </div>
+              <div className="rounded-[1.75rem] border border-slate-700/70 bg-slate-900/95 p-5">
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Acoustic</p>
+                <div className="mt-4 flex items-center gap-3 text-white">
+                  <Volume2 className="h-6 w-6 text-amber-300" />
+                  <div>
+                    <p className="text-3xl font-semibold">{Math.round(scoreBreakdown.acousticScore)}%</p>
+                    <p className="text-sm text-slate-400">Noise load estimate</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="rounded-[1.75rem] border border-slate-700/70 bg-slate-900/95 p-5">
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Fusion logic</p>
+                <p className="mt-4 text-sm leading-7 text-slate-300">{`0.50 × Visual + 0.35 × Behavioral + 0.15 × Acoustic`}</p>
+              </div>
+              <div className="rounded-[1.75rem] border border-slate-700/70 bg-slate-900/95 p-5">
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Alert pattern</p>
+                <p className="mt-4 text-sm leading-7 text-slate-300">
+                  {alertState === 'red'
+                    ? 'High strain across all sensors.'
+                    : alertState === 'amber'
+                    ? 'Moderate signal accumulation detected.'
+                    : 'Stable performance and ergonomics.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
+              <button
+                onClick={launchMonitoring}
+                className="inline-flex items-center justify-center gap-2 rounded-3xl bg-cyan-500 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400"
+              >
+                <Camera className="h-4 w-4" />
+                {monitoring ? 'Restart session' : 'Start monitoring'}
               </button>
-            )}
-          </div>
-          {errorMessage && <p className="error-text">{errorMessage}</p>}
+              <button
+                onClick={resetState}
+                className="inline-flex items-center justify-center gap-2 rounded-3xl border border-slate-700/80 bg-slate-900/95 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:border-slate-500"
+              >
+                <AlertTriangle className="h-4 w-4 text-amber-300" />
+                Reset session
+              </button>
+            </div>
+          </article>
+
+          <aside className="space-y-6">
+            <div className="rounded-[2rem] border border-slate-700/60 bg-slate-950/90 p-6 shadow-glow backdrop-blur-xl">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.3em] text-cyan-300/90">Privacy controls</p>
+                  <h3 className="mt-2 text-2xl font-semibold text-white">Local AI & BYOK</h3>
+                </div>
+                <ShieldCheck className="h-7 w-7 text-emerald-300" />
+              </div>
+
+              <div className="mt-5 space-y-4">
+                <button
+                  type="button"
+                  onClick={() => setShowSettings(open => !open)}
+                  className="flex w-full items-center justify-between rounded-3xl border border-slate-700/80 bg-slate-900/95 px-4 py-3 text-sm text-slate-200 transition hover:border-slate-500"
+                >
+                  <span className="inline-flex items-center gap-2 text-slate-100">
+                    <Cpu className="h-4 w-4 text-cyan-300" />
+                    AI inference preferences
+                  </span>
+                  <span>{showSettings ? 'Hide' : 'Show'}</span>
+                </button>
+
+                {showSettings && (
+                  <div className="space-y-3 rounded-3xl border border-slate-700/60 bg-slate-900/95 p-4">
+                    <label className="flex items-center justify-between gap-3 text-sm text-slate-200">
+                      <span>Local inference only</span>
+                      <button
+                        type="button"
+                        onClick={() => setAiSettings(prev => ({ ...prev, localInference: !prev.localInference }))}
+                        className="inline-flex h-9 w-14 items-center rounded-full bg-slate-800 p-1 transition"
+                      >
+                        <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full bg-white text-slate-950 transition ${aiSettings.localInference ? 'translate-x-6' : 'translate-x-0'}`}>
+                          {aiSettings.localInference ? <ToggleLeft className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
+                        </span>
+                      </button>
+                    </label>
+                    <label className="flex items-center justify-between gap-3 text-sm text-slate-200">
+                      <span>Bring your own key (BYOK)</span>
+                      <button
+                        type="button"
+                        onClick={() => setAiSettings(prev => ({ ...prev, byokMode: !prev.byokMode }))}
+                        className="inline-flex h-9 w-14 items-center rounded-full bg-slate-800 p-1 transition"
+                      >
+                        <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full bg-white text-slate-950 transition ${aiSettings.byokMode ? 'translate-x-6' : 'translate-x-0'}`}>
+                          <KeyRound className="h-4 w-4" />
+                        </span>
+                      </button>
+                    </label>
+                    <label className="flex items-center justify-between gap-3 text-sm text-slate-200">
+                      <span>Keep keys local</span>
+                      <span className="rounded-full bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200">{aiSettings.keepKeysLocal ? 'Enabled' : 'Disabled'}</span>
+                    </label>
+                  </div>
+                )}
+
+                <div className="rounded-3xl bg-slate-900/95 p-4 text-sm leading-6 text-slate-300 ring-1 ring-slate-700/60">
+                  <p className="font-semibold text-white">Privacy note</p>
+                  <p className="mt-2">All processing is client-side only. No video, audio, or keystroke metadata leaves this browser session.</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-[2rem] border border-slate-700/60 bg-slate-950/90 p-6 shadow-glow backdrop-blur-xl">
+              <div className="flex items-center gap-3 text-sm uppercase tracking-[0.28em] text-slate-500">
+                <Camera className="h-4 w-4 text-cyan-300" />
+                Vision overlay status
+              </div>
+              <div className="mt-4 space-y-4">
+                <div className="rounded-3xl bg-slate-900/95 p-4 text-sm text-slate-300">
+                  <p className="text-slate-300">{captureLabel}</p>
+                  <p className="mt-2 text-xs text-slate-500">{monitoring ? (fallbackMode ? 'Mock fallback is active.' : 'Live camera overlay is rendering.') : 'Start monitoring to show live overlays.'}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOverlayEnabled(enabled => !enabled)}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-3xl bg-slate-800/95 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-700"
+                >
+                  <Eye className="h-4 w-4 text-cyan-300" />
+                  {overlayEnabled ? 'Disable overlay' : 'Enable overlay'}
+                </button>
+              </div>
+            </div>
+          </aside>
         </section>
 
-        <section className="panel metrics-panel">
-          <div className="metric-card">
-            <div>
-              <span className="metric-label">Acoustic Stress</span>
-              <strong>{metrics.db} dB</strong>
+        <section className="grid gap-6 xl:grid-cols-[0.95fr_0.85fr]">
+          <article className="overflow-hidden rounded-[2rem] border border-slate-700/60 bg-slate-950/90 shadow-glow backdrop-blur-xl">
+            <div className="relative h-[420px] min-h-[24rem]" ref={wrapperRef}>
+              <div className="absolute inset-0 overflow-hidden rounded-[2rem] bg-slate-900/90">
+                {fallbackMode ? (
+                  <div className="absolute inset-0 animate-gradient-slow bg-[radial-gradient(circle_at_top_left,rgba(59,130,246,0.22),transparent_22%),radial-gradient(circle_at_bottom_right,rgba(232,121,249,0.12),transparent_26%)]" />
+                ) : (
+                  <video
+                    ref={videoRef}
+                    className="absolute inset-0 h-full w-full object-cover"
+                    playsInline
+                    muted
+                    autoPlay
+                  />
+                )}
+                <canvas ref={canvasRef} className="absolute inset-0 h-full w-full mix-blend-screen" />
+              </div>
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950/95 to-transparent px-6 py-4 text-slate-200">
+                <p className="text-sm font-medium">{fallbackMode ? 'Secure simulation engine active' : 'Live camera overlay rendering'}</p>
+              </div>
             </div>
-            <p>Microphone-based audio pressure estimation.</p>
-          </div>
-          <div className="metric-card">
-            <div>
-              <span className="metric-label">Typing Jitter</span>
-              <strong>{metrics.typingJitter} ms</strong>
-            </div>
-            <p>Keyboard cadence variance and burst patterns.</p>
-          </div>
-          <div className="metric-card">
-            <div>
-              <span className="metric-label">Backspace Count</span>
-              <strong>{metrics.backspaceCount}</strong>
-            </div>
-            <p>Quick error recovery and frustration indicator.</p>
-          </div>
-          <div className="metric-card">
-            <div>
-              <span className="metric-label">Visual Ergonomics</span>
-              <strong>{metrics.screenDistance > 1.2 ? 'Slouching' : 'Optimal'}</strong>
-            </div>
-            <p>Simulated screen-proximity posture and blink state.</p>
-          </div>
+          </article>
 
-          <div className="metric-card">
-            <div>
-              <span className="metric-label">Camera Movement</span>
-              <strong>{metrics.movementLabel}</strong>
+          <article className="space-y-4 rounded-[2rem] border border-slate-700/60 bg-slate-950/90 p-6 shadow-glow backdrop-blur-xl">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-cyan-300/90">Signal feed</p>
+                <h3 className="text-2xl font-semibold text-white">Motion + posture</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOverlayEnabled(enabled => !enabled)}
+                className="rounded-3xl border border-slate-700/80 bg-slate-900/95 px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-slate-500"
+              >
+                {overlayEnabled ? 'Hide overlays' : 'Show overlays'}
+              </button>
             </div>
-            <p>Live camera motion capture shows how your head and posture change every second.</p>
-          </div>
 
-          <div className="metric-card">
-            <div>
-              <span className="metric-label">Fusion Logic</span>
-              <strong>{fusionFormula}</strong>
+            <div className="grid gap-4">
+              <div className="rounded-3xl border border-slate-700/70 bg-slate-900/95 p-4">
+                <p className="text-sm text-slate-400">Live trend</p>
+                <p className="mt-2 text-xl font-semibold text-white">{metrics.movementLabel}</p>
+                <p className="mt-1 text-sm text-slate-500">Score {metrics.motionScore}</p>
+              </div>
+              <div className="rounded-3xl border border-slate-700/70 bg-slate-900/95 p-4">
+                <p className="text-sm text-slate-400">Facial confidence</p>
+                <p className="mt-2 text-xl font-semibold text-white">{Math.round(metrics.faceConfidence * 100)}%</p>
+              </div>
+              <div className="rounded-3xl border border-slate-700/70 bg-slate-900/95 p-4">
+                <p className="text-sm text-slate-400">Head angle</p>
+                <p className="mt-2 text-xl font-semibold text-white">{metrics.headAngle}°</p>
+              </div>
+              <div className="rounded-3xl border border-slate-700/70 bg-slate-900/95 p-4">
+                <p className="text-sm text-slate-400">Eye aspect ratio</p>
+                <p className="mt-2 text-xl font-semibold text-white">{metrics.eyeAspect.toFixed(2)}</p>
+              </div>
             </div>
-            <p>
-              Combining visual, behavioral, and acoustic subscores into a single burnout threat index.
-            </p>
-          </div>
+          </article>
         </section>
-      </main>
 
-      <section className="video-section panel">
-        <div className="video-grid">
-          <div className="video-frame">
-            <video ref={videoRef} className="live-camera" playsInline muted autoPlay />
-            <canvas ref={canvasRef} className="motion-overlay" />
-            <div className="video-overlay">
+        <section className="grid gap-6 xl:grid-cols-2">
+          <article className="rounded-[2rem] border border-slate-700/60 bg-slate-950/90 p-6 shadow-glow backdrop-blur-xl">
+            <div className="flex items-center gap-3 text-sm uppercase tracking-[0.3em] text-slate-500">
+              <Info className="h-4 w-4 text-slate-300" />
+              How it works
+            </div>
+            <div className="mt-5 space-y-4 text-sm leading-7 text-slate-300">
+              <p>
+                AuraSense blends local sensor telemetry with simulated visual intelligence. It draws camera-friendly overlays in-browser, estimates ergonomic risk, and fuses it into a single burnout index.
+              </p>
+              <p>
+                Local AI settings keep model behavior on-device. When permissions are unavailable, the mock fallback engine preserves the experience and protects privacy.
+              </p>
+              <p>
+                The dashboard supports signal fusion across three modalities: visual posture, typing behavior, and ambient audio pressure.
+              </p>
+            </div>
+          </article>
+
+          <article className="rounded-[2rem] border border-slate-700/60 bg-slate-950/90 p-6 shadow-glow backdrop-blur-xl">
+            <div className="flex items-center justify-between gap-3">
               <div>
-                <strong>Camera capture active</strong>
-                <p>{metrics.movementLabel} / motion score {metrics.motionScore}</p>
+                <p className="text-sm uppercase tracking-[0.3em] text-cyan-300/90">Integration ready</p>
+                <h3 className="mt-1 text-2xl font-semibold text-white">Deployment & fallback</h3>
               </div>
-              <div>
-                  <span className="motion-badge">Movement snapshot</span>
-                  <button
-                    className="overlay-toggle"
-                    onClick={() => {
-                      setOverlayEnabled(prev => {
-                        overlayEnabledRef.current = !prev
-                        return !prev
-                      })
-                    }}
-                    style={{ marginLeft: 12 }}
-                  >
-                    {overlayEnabled ? 'Hide overlays' : 'Show overlays'}
-                  </button>
+              <Sparkles className="h-6 w-6 text-emerald-300" />
+            </div>
+            <div className="mt-6 grid gap-4">
+              <div className="rounded-3xl border border-slate-700/70 bg-slate-900/95 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm text-slate-400">Mock fallback</span>
+                  <span className="rounded-full bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200">Enabled</span>
+                </div>
+                <p className="mt-3 text-sm text-slate-300">The app stays usable even when hardware permission is blocked. Core metrics remain visible and privacy is preserved.</p>
+              </div>
+              <div className="rounded-3xl border border-slate-700/70 bg-slate-900/95 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm text-slate-400">BYOK readiness</span>
+                  <span className="rounded-full bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200">Ready</span>
+                </div>
+                <p className="mt-3 text-sm text-slate-300">Keep your own encryption keys local and use private AI settings without sending secrets to external services.</p>
               </div>
             </div>
-          </div>
-          <div className="motion-feed">
-            <h3>Movement timeline</h3>
-            <ul>
-              {movementTimeline.length === 0 ? (
-                <li>No movement captured yet. Start monitoring to see second-by-second updates.</li>
-              ) : (
-                movementTimeline.map((event, index) => (
-                  <li key={`${event}-${index}`} className="motion-item">{event}</li>
-                ))
-              )}
-            </ul>
-          </div>
-        </div>
-        <div className="video-note">
-          <p>
-            The video feed captures your camera frame and simulates movement tracking every second. This helps AuraSense illustrate how posture and motion affect the visual modality score.
-          </p>
-        </div>
-        <div className="video-metric-panel">
-          <h4>Computer vision signals</h4>
-          <div className="video-metric-grid">
-            <div className="video-metric-card">
-              <span>Face detection confidence</span>
-              <strong>{Math.round(metrics.faceConfidence * 100)}%</strong>
-            </div>
-            <div className="video-metric-card">
-              <span>Eye aspect ratio (EAR)</span>
-              <strong>{metrics.eyeAspect.toFixed(2)}</strong>
-            </div>
-            <div className="video-metric-card">
-              <span>Head angle</span>
-              <strong>{metrics.headAngle}°</strong>
-            </div>
-            <div className="video-metric-card">
-              <span>What the system checks</span>
-              <p>Face box, eye openness, head tilt, posture drift.</p>
-            </div>
-          </div>
-        </div>
-      </section>
+          </article>
+        </section>
 
-      <section className="info-section">
-        <button className="info-toggle" onClick={() => setShowInfo(!showInfo)}>
-          {showInfo ? '▼ How It Works' : '► How It Works'}
-        </button>
-        {showInfo && (
-          <div className="info-content">
-            <div className="modality-card">
-              <h4>Visual capture</h4>
-              <p>
-                AuraSense simulates eye and posture metrics in the browser. It monitors blink frequency, eye aspect ratio, and screen-distance posture to infer visual strain.
-              </p>
-              <p>
-                Current values: <strong>{metrics.blinkCount} blinks/min</strong>, <strong>{metrics.screenDistance.toFixed(2)}</strong> distance factor.
-              </p>
-              <p>
-                Visual subscore = <strong>{visualScore.toFixed(0)}</strong> from posture and blink behavior.
-              </p>
-            </div>
-            <div className="modality-card">
-              <h4>Behavioral capture</h4>
-              <p>
-                Keyboard cadence is used to calculate typing jitter and frustration. Rapid backspaces and variable keystroke intervals increase the behavioral risk signal.
-              </p>
-              <p>
-                Current values: <strong>{metrics.typingJitter} ms</strong> jitter, <strong>{metrics.backspaceCount} backspaces</strong>.
-              </p>
-              <p>
-                Behavioral subscore = <strong>{behavioralScore.toFixed(0)}</strong>.
-              </p>
-            </div>
-            <div className="modality-card">
-              <h4>Acoustic capture</h4>
-              <p>
-                The microphone listener computes a live audio level and maps it into a decibel-like stress score. Higher sustained noise levels raise cognitive load risk.
-              </p>
-              <p>
-                Current value: <strong>{metrics.db} dB</strong> equivalent.
-              </p>
-              <p>
-                Acoustic subscore = <strong>{acousticScore.toFixed(0)}</strong>.
-              </p>
-            </div>
-            <div className="modality-card">
-              <h4>Burnout calculation</h4>
-              <p>
-                Final threat index = 0.50 × Visual + 0.35 × Behavioral + 0.15 × Acoustic.
-              </p>
-              <p>
-                Current calculation: <strong>{visualScore.toFixed(0)} × 0.50 + {behavioralScore.toFixed(0)} × 0.35 + {acousticScore.toFixed(0)} × 0.15</strong>.
-              </p>
-              <p>
-                This yields the burnout score shown at the top: <strong>{burnoutScore}%</strong>.
-              </p>
-            </div>
-            <h3>Three Modalities of AuraSense</h3>
-            
-            <div className="modality-card">
-              <h4>🔊 Acoustic Modality</h4>
-              <p>AuraSense monitors your ambient sound environment using the microphone. High noise levels (above 65dB) indicate environmental stressors that can disrupt focus and mental clarity. The acoustic engine samples local audio pressure in real time without recording or storing speech.</p>
-              <p className="impact"><strong>Impact:</strong> High ambient noise contributes 15% to your burnout score.</p>
-            </div>
-
-            <div className="modality-card">
-              <h4>⌨️ Behavioral Modality</h4>
-              <p>Your typing patterns reveal cognitive load and frustration levels. When you're stressed, typing becomes erratic — keystroke intervals vary wildly, and error corrections (backspaces) spike. AuraSense measures keystroke cadence variance and backspace frequency to quantify this behavioral signal.</p>
-              <p className="impact"><strong>Impact:</strong> Typing stress contributes 35% to your burnout score.</p>
-            </div>
-
-            <div className="modality-card">
-              <h4>👁️ Visual Modality</h4>
-              <p>Your screen distance and blink patterns indicate ergonomic strain. Poor posture (slouching closer to the screen) and reduced blink frequency signal eye strain and neck fatigue. AuraSense currently simulates these values, with plans to integrate MediaPipe FaceMesh for real-time tracking.</p>
-              <p className="impact"><strong>Impact:</strong> Visual strain contributes 50% to your burnout score.</p>
-            </div>
-          </div>
-        )}
-      </section>
-
-      <section className="stress-section">
-        <button className="info-toggle" onClick={() => setShowInfo(!showInfo)}>
-          {showInfo ? '▼ Burnout Levels' : '► Burnout Levels'}
-        </button>
-        {showInfo && (
-          <div className="stress-content">
-            <h3>Understanding Your Burnout State</h3>
-            
-            <div className="stress-level green">
-              <div className="stress-header">
-                <span className="status-badge green">GREEN</span>
-                <h4>Optimal Focus State (0–45%)</h4>
-              </div>
-              <p><strong>Description:</strong> You are in the optimal state for deep work. Your acoustic environment is calm, typing is steady, and posture is upright.</p>
-              <p><strong>What you're experiencing:</strong> Flow state, clear thinking, energy and motivation.</p>
-              <p><strong>Recommendation:</strong> Maintain your current pace. Take natural breaks every 60 minutes to stay refreshed.</p>
-            </div>
-
-            <div className="stress-level amber">
-              <div className="stress-header">
-                <span className="status-badge amber">AMBER</span>
-                <h4>Warning State (45–75%)</h4>
-              </div>
-              <p><strong>Description:</strong> Early signs of burnout are emerging. Your acoustic environment may be noisy, typing is becoming erratic, or posture is degrading.</p>
-              <p><strong>What you're experiencing:</strong> Mild frustration, reduced focus, slight physical discomfort, distractions.</p>
-              <p><strong>Recommendation:</strong> Take a 10-minute break. Stretch, hydrate, adjust your posture. Reduce background noise if possible.</p>
-            </div>
-
-            <div className="stress-level red">
-              <div className="stress-header">
-                <span className="status-badge red">RED</span>
-                <h4>Critical Burnout State (75–100%)</h4>
-              </div>
-              <p><strong>Description:</strong> You are at high risk of burnout. Multiple stress signals are active — high noise, erratic typing, and poor posture compound into critical strain.</p>
-              <p><strong>What you're experiencing:</strong> Acute frustration, brain fog, physical tension, inability to focus.</p>
-              <p><strong>Recommendation:</strong> Stop work immediately. Take a 20-30 minute screen break. Step outside, walk, breathe deeply. Reset your environment before resuming.</p>
-            </div>
-          </div>
-        )}
-      </section>
-
-      <footer className="footer-card">
-        <p>Built with React + Vite — all processing happens in the browser. Your data never leaves your device.</p>
-      </footer>
+        <footer className="rounded-[2rem] border border-slate-700/60 bg-slate-950/90 p-6 text-sm text-slate-400 shadow-glow backdrop-blur-xl">
+          Built with React + Vite. All telemetry processing remains in the browser, and no user data is stored by AuraSense.
+        </footer>
+      </div>
     </div>
   )
 }
